@@ -11,7 +11,52 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from pprint import pprint
+
 CACHE_PATH = './cache.json'
+FILE_EXTENSIONS = {
+    'python3': 'py',
+    'cpp': 'cpp'
+}
+
+def access_cache(key, data=None, read=True):
+    if not os.path.exists(CACHE_PATH) or os.path.getsize(CACHE_PATH) == 0:
+        with open(CACHE_PATH,'w') as f:
+            json.dump({}, f)
+    
+    if read:
+        with open(CACHE_PATH, 'r') as f:
+            cache_data = json.load(f)
+        
+        try:
+            print('Retrieved cache[%s]' % key)
+            if datetime.now().timestamp() - cache_data[key]['timestamp'] < 86400:
+                return cache_data[key]
+            else:
+                print('Cache is >= 1 day old, making API request instead')
+        except:
+            print('Could not retrieve cache[%s]' % key)
+            print('Making API request instead')
+    
+    with open(CACHE_PATH, 'r') as f:
+        cache_data = json.load(f)
+    # if cache is empty
+    if not cache_data:
+        cache_data = {key: {}}
+
+    with open(CACHE_PATH, 'w') as f:
+        cache_entry = {}
+        if key in cache_data.keys():
+            cache_entry = cache_data[key]
+        
+        cache_entry['data'] = data
+        cache_entry['timestamp'] = datetime.now().timestamp()
+        
+        cache_data[key] = cache_entry
+        
+        print('Succesfully cached cache[%s]' % key)
+        
+        json.dump(cache_data, f, indent=4)
 
 class LeetcodeDataSourcer:
     def __init__(self) -> None:
@@ -29,44 +74,6 @@ class LeetcodeDataSourcer:
             'LEETCODE_SESSION': config.LEET_SESH,
             'csrftoken': config.CSRF
         }
-        
-    def access_cache(self, key, data=None, read=True):
-        if not os.path.exists(CACHE_PATH) or os.path.getsize(CACHE_PATH) == 0:
-            with open(CACHE_PATH,'w') as f:
-                json.dump({}, f)
-        
-        if read:
-            with open(CACHE_PATH, 'r') as f:
-                cache_data = json.load(f)
-            
-            try:
-                print('Retrieved cache[%s]' % key)
-                return cache_data[key]
-            except:
-                print('Could not retrieve cache[%s]' % key)
-                print('Making API request instead')
-            
-            return None
-        
-        with open(CACHE_PATH, 'r') as f:
-            cache_data = json.load(f)
-        # if cache is empty
-        if not cache_data:
-            cache_data = {key: {}}
-
-        with open(CACHE_PATH, 'w') as f:
-            cache_entry = {}
-            if key in cache_data.keys():
-                cache_entry = cache_data[key]
-            
-            cache_entry['data'] = data
-            cache_entry['timestamp'] = datetime.now().timestamp()
-            
-            cache_data[key] = cache_entry
-            
-            print('Succesfully cached cache[%s]' % key)
-            
-            json.dump(cache_data, f, indent=4)
                 
     def get_api_json(self, endpoint):
         session = requests.Session()
@@ -77,14 +84,14 @@ class LeetcodeDataSourcer:
     def get_solved_problems(self):
         diff_map = {1: 'easy', 2: 'medium', 3: 'hard'}
         # filter problems by solved
-        cached = self.access_cache('problems', read=True)
+        cached = access_cache('problems', read=True)
         all_problems = []
         
         if cached:
             all_problems = cached['data']
         else:
             all_problems = self.get_api_json(self.problem_endpoint)['stat_status_pairs']
-            self.access_cache('problems', all_problems, read=False)
+            access_cache('problems', all_problems, read=False)
             
         solved_problems = list(filter(lambda obj: obj['status'] == 'ac', all_problems))
         # add problem url to problem objects
@@ -101,7 +108,7 @@ class LeetcodeDataSourcer:
             }
     
     def get_submissions(self):
-        cached = self.access_cache('submissions', read=True)
+        cached = access_cache('submissions', read=True)
         submission_data_raw = []
         
         if cached:
@@ -127,7 +134,7 @@ class LeetcodeDataSourcer:
                     self.submission_endpoint + pagination_query(offset, limit)
                 )['submissions_dump']
             
-            self.access_cache('submissions', submission_data_raw, read=False)
+            access_cache('submissions', submission_data_raw, read=False)
             
         # filter out wrong submission
         submission_accepted = list(filter(lambda obj: obj['status_display'] == 'Accepted', submission_data_raw))
@@ -157,18 +164,26 @@ class LeetcodeDataSourcer:
         submissions = self.get_submissions()
         return list(filter(lambda x: x['title'] == title_slug, submissions))[0]
     
-    def download_submission(self):
-        pass
-    
-    def update_cool_stats():
-        pass
+    def download_submissions(self):
+        valid_submissions = self.get_submissions()
+        solved_probs = self.get_solved_problems()
+        # combine keys
+        solved_probs = solved_probs['easy'] + solved_probs['medium'] + solved_probs['hard']
+        solved_probs.sort(key=lambda x: x['stat']['question__title_slug'])
+        valid_submissions.sort(key=lambda x: x['title'])
+        
+        for (sub, prob) in zip(valid_submissions, solved_probs):
+                path = './%s' % prob['difficulty'] + '/%s.' % sub['data']['title_slug'] + FILE_EXTENSIONS[sub['data']['lang']]
+                if not os.path.exists(path):
+                    with open(path, 'w') as f:
+                        f.write(sub['data']['code'])
     
 class SpreadsheetUpdater:
     def __init__(self) -> None:
         self.SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
         self.SPREADSHEET_ID = '1QPPbdOEkY3lVqNHcejLFSL2Q7nIqxBYoOliPTk5l1eE'
         
-    def get_creds(self):
+    def get_service(self):
         creds = None
         # The file token.json stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
@@ -187,9 +202,20 @@ class SpreadsheetUpdater:
             with open('token.json', 'w') as token:
                 token.write(creds.to_json())
         
-        return creds
+        return build('sheets', 'v4', credentials=creds)
     
-
+    def cache_problem_notes(self):
+        service = self.get_service()
+        sheet = service.spreadsheets()
+        # get the notes
+        result = sheet.values().get(spreadsheetId=self.SPREADSHEET_ID, range='A2:E25').execute()
+        values = result.get('values', [])
+        print(values)
+        cache_object = [{values[i][0]: values[i][3]} for i in range(len(values))]
+        access_cache('notes', cache_object, read=False)
+    
 if __name__ == '__main__':
     su = SpreadsheetUpdater()
-    su.get_creds()
+    su.cache_problem_notes()
+    # lc = LeetcodeDataSourcer()
+    # lc.download_submissions()
